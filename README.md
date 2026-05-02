@@ -2,7 +2,7 @@
 
 A beautiful, feature-rich **pixel art animator** that runs entirely in the browser — no installs needed.
 
-🔗 **Live Demo:** [Open PixelForge](https://YOUR_USERNAME.github.io/pixelforge)
+🔗 **Live Demo:** [Open PixelForge](https://mannuru-mahesh.github.io/pixel-art-animator)
 
 ---
 
