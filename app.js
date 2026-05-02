@@ -310,19 +310,33 @@ mainCanvas.addEventListener('mouseup', e => {
 mainCanvas.addEventListener('contextmenu',e=>e.preventDefault());
 mainCanvas.addEventListener('mouseleave',()=>{if(isDrawing&&(tool==='pencil'||tool==='eraser'))isDrawing=false;});
 
+// ── TOAST ─────────────────────────────────────────────────────────────────────
+function showToast(msg) {
+  let t = document.getElementById('toast');
+  if (!t) { t = document.createElement('div'); t.id='toast'; t.style.cssText='position:fixed;bottom:160px;left:50%;transform:translateX(-50%);background:#7c3aed;color:#fff;padding:8px 18px;border-radius:20px;font-size:13px;z-index:999;pointer-events:none;transition:opacity .4s'; document.body.appendChild(t); }
+  t.textContent = msg; t.style.opacity = '1';
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.style.opacity = '0', 1800);
+}
+
 // ── PLAYBACK ──────────────────────────────────────────────────────────────────
 function togglePlay() {
+  if (frames.length < 2) { showToast('Add more frames to animate! (+ Frame)'); return; }
+  clearInterval(playTimer);
   playing = !playing;
   btnPlay.textContent = playing ? '⏸ Pause' : '▶ Play';
   btnPlay.classList.toggle('playing', playing);
   if (playing) {
-    playTimer = setInterval(()=>{
-      currentFrame = (currentFrame+1) % frames.length;
-      if (!loopAnim && currentFrame===0) { togglePlay(); return; }
+    let framesSinceReset = 0;
+    playTimer = setInterval(() => {
+      currentFrame = (currentFrame + 1) % frames.length;
+      framesSinceReset++;
+      if (!loopAnim && currentFrame === 0 && framesSinceReset >= frames.length) {
+        clearInterval(playTimer); playing = false;
+        btnPlay.textContent = '▶ Play'; btnPlay.classList.remove('playing'); return;
+      }
       selectFrame(currentFrame);
-    }, 1000/fps);
-  } else {
-    clearInterval(playTimer);
+    }, Math.round(1000 / fps));
   }
 }
 
@@ -345,6 +359,68 @@ function resizeCanvas(newW, newH) {
   buildFrameStrip(); render();
 }
 
+// ── INLINE GIF ENCODER (no CDN worker needed) ────────────────────────────────
+function lzwCompress(pixels, minSize) {
+  const clear = 1 << minSize, eoi = clear + 1;
+  let codeSize = minSize + 1, nextCode = eoi + 1;
+  let table = new Map();
+  const reset = () => { table = new Map(); codeSize = minSize + 1; nextCode = eoi + 1; };
+  const out = []; let buf = 0, bits = 0;
+  const emit = (code) => {
+    buf |= code << bits; bits += codeSize;
+    while (bits >= 8) { out.push(buf & 0xFF); buf >>>= 8; bits -= 8; }
+  };
+  emit(clear);
+  let prefix = pixels[0];
+  for (let i = 1; i < pixels.length; i++) {
+    const s = pixels[i], key = `${prefix}_${s}`;
+    if (table.has(key)) { prefix = table.get(key); }
+    else {
+      emit(prefix);
+      if (nextCode <= 4095) { table.set(key, nextCode++); if (nextCode > (1<<codeSize) && codeSize < 12) codeSize++; }
+      else { emit(clear); reset(); }
+      prefix = s;
+    }
+  }
+  emit(prefix); emit(eoi);
+  if (bits > 0) out.push(buf & 0xFF);
+  return out;
+}
+
+function buildGIF(rawFrames, w, h, delayMs) {
+  const palette = [{r:0,g:0,b:0}]; // index 0 = transparent
+  const cIdx = new Map();
+  for (const f of rawFrames) {
+    for (let i = 0; i < f.length; i += 4) {
+      if (f[i+3] < 128) continue;
+      const k = `${f[i]},${f[i+1]},${f[i+2]}`;
+      if (!cIdx.has(k) && palette.length < 256) { cIdx.set(k, palette.length); palette.push({r:f[i],g:f[i+1],b:f[i+2]}); }
+    }
+  }
+  let cb = 1; while ((1<<cb) < palette.length) cb++; cb = Math.max(cb, 2);
+  while (palette.length < (1<<cb)) palette.push({r:0,g:0,b:0});
+  const o = [], wb = (...b) => o.push(...b), ws = s => { for(const c of s) o.push(c.charCodeAt(0)); }, ww = n => o.push(n&0xFF,(n>>8)&0xFF);
+  ws('GIF89a'); ww(w); ww(h); wb(0x80|((cb-1)<<4)|(cb-1)); wb(0); wb(0);
+  for (const {r,g,b} of palette) wb(r,g,b);
+  ws('\x21\xFF\x0BNETSCAPE2.0\x03\x01'); ww(0); wb(0);
+  const lzwMin = Math.max(cb, 2);
+  const d10 = Math.max(1, Math.round(delayMs/10));
+  for (const f of rawFrames) {
+    const idx = new Uint8Array(w*h);
+    for (let i = 0; i < w*h; i++) {
+      if (f[i*4+3]<128) { idx[i]=0; continue; }
+      const k = `${f[i*4]},${f[i*4+1]},${f[i*4+2]}`; idx[i] = cIdx.has(k)?cIdx.get(k):0;
+    }
+    wb(0x21,0xF9,0x04,0x05); ww(d10); wb(0); wb(0);
+    wb(0x2C); ww(0); ww(0); ww(w); ww(h); wb(0);
+    wb(lzwMin);
+    const comp = lzwCompress(idx, lzwMin);
+    let p = 0; while (p < comp.length) { const n=Math.min(255,comp.length-p); wb(n); for(let i=0;i<n;i++) wb(comp[p+i]); p+=n; } wb(0);
+  }
+  wb(0x3B);
+  return new Uint8Array(o);
+}
+
 // ── EXPORT ────────────────────────────────────────────────────────────────────
 function showModal(title) { document.getElementById('modal-title').textContent=title; modalOverlay.style.display='flex'; progressFill.style.width='0%'; modalStatus.textContent='Preparing…'; modalClose.style.display='none'; }
 function hideModal() { modalOverlay.style.display='none'; }
@@ -358,33 +434,31 @@ function exportPNG() {
 
 function exportGIF() {
   showModal('Exporting GIF…');
-  const scale = Math.max(1, Math.floor(512/CW));
-  const W = CW*scale, H = CH*scale;
-
-  // Build offscreen canvases for each frame
-  const canvases = frames.map(f => {
-    const off = Object.assign(document.createElement('canvas'),{width:W,height:H});
-    const tc = off.getContext('2d');
-    const src = Object.assign(document.createElement('canvas'),{width:CW,height:CH});
-    src.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(f),CW,CH),0,0);
-    tc.imageSmoothingEnabled=false;
-    tc.drawImage(src,0,0,W,H);
-    return off;
-  });
-
-  try {
-    const gif = new GIF({ workers:2, quality:5, width:W, height:H, workerScript:'https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.worker.js' });
-    canvases.forEach(c => gif.addFrame(c, {delay: Math.round(1000/fps)}));
-    gif.on('progress', p => { progressFill.style.width=(p*100)+'%'; modalStatus.textContent=`Encoding… ${Math.round(p*100)}%`; });
-    gif.on('finished', blob => {
-      modalStatus.textContent='Done!'; progressFill.style.width='100%'; modalClose.style.display='block';
-      const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='pixelforge.gif'; a.click();
-    });
-    gif.render();
-  } catch(err) {
-    modalStatus.textContent='GIF export requires an internet connection for worker script.';
-    modalClose.style.display='block';
-  }
+  modalStatus.textContent = 'Encoding frames…';
+  progressFill.style.width = '30%';
+  setTimeout(() => {
+    try {
+      const scale = Math.max(1, Math.floor(256/CW));
+      const W = CW*scale, H = CH*scale;
+      const scaled = frames.map(f => {
+        const src = Object.assign(document.createElement('canvas'),{width:CW,height:CH});
+        src.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(f),CW,CH),0,0);
+        const dst = Object.assign(document.createElement('canvas'),{width:W,height:H});
+        const dc = dst.getContext('2d'); dc.imageSmoothingEnabled=false; dc.drawImage(src,0,0,W,H);
+        return dc.getImageData(0,0,W,H).data;
+      });
+      progressFill.style.width = '60%';
+      const gifBytes = buildGIF(scaled, W, H, Math.round(1000/fps));
+      progressFill.style.width = '100%';
+      modalStatus.textContent = 'Done! Downloading…';
+      modalClose.style.display = 'block';
+      const blob = new Blob([gifBytes], {type:'image/gif'});
+      const a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='pixelforge.gif'; a.click();
+    } catch(e) {
+      modalStatus.textContent = 'Error: ' + e.message;
+      modalClose.style.display = 'block';
+    }
+  }, 50);
 }
 
 // ── KEYBOARD ──────────────────────────────────────────────────────────────────
